@@ -11,8 +11,19 @@
         "s3",
         "r2"
     ],
+    "homepage": "https://github.com/abduns/laravel-db-backup",
     "type": "library",
     "license": "MIT",
+    "authors": [
+        {
+            "name": "Abduns",
+            "homepage": "https://github.com/abduns"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/abduns/laravel-db-backup/issues",
+        "source": "https://github.com/abduns/laravel-db-backup"
+    },
     "require": {
         "php": "^8.3",
         "ext-zlib": "*",

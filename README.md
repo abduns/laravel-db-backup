@@ -1,5 +1,9 @@
 # Laravel DB Backup
 
+[![Tests](https://github.com/abduns/laravel-db-backup/actions/workflows/tests.yml/badge.svg)](https://github.com/abduns/laravel-db-backup/actions/workflows/tests.yml)
+[![Latest Version](https://img.shields.io/packagist/v/abduns/laravel-db-backup.svg)](https://packagist.org/packages/abduns/laravel-db-backup)
+[![License](https://img.shields.io/packagist/l/abduns/laravel-db-backup.svg)](LICENSE)
+
 Back up a Laravel database to any filesystem disk (AWS S3, Cloudflare R2, MinIO, local) on a schedule, with a history of every run, retention, and an alert when backups stop succeeding.
 
 - PostgreSQL (`pg_dump` custom format), MySQL/MariaDB (`mysqldump`, gzipped) and SQLite (`VACUUM INTO`, gzipped).
