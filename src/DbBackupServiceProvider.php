@@ -33,6 +33,7 @@ class DbBackupServiceProvider extends ServiceProvider
 
         $this->publishesMigrations([
             __DIR__.'/../database/migrations/2026_10_11_000000_create_database_backups_table.php' => database_path('migrations/2026_10_11_000000_create_database_backups_table.php'),
+            __DIR__.'/../database/migrations/2026_11_03_000000_add_checksum_to_database_backups_table.php' => database_path('migrations/2026_11_03_000000_add_checksum_to_database_backups_table.php'),
         ], 'db-backup-migrations');
 
         $this->commands([

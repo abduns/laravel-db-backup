@@ -4,6 +4,7 @@ namespace Abduns\DbBackup\Dumpers;
 
 use Abduns\DbBackup\Exceptions\DumpFailed;
 use Abduns\DbBackup\Support\ConnectsToPostgres;
+use Abduns\DbBackup\Support\TemporaryDirectory;
 use Illuminate\Support\Facades\Process;
 
 /**
@@ -17,6 +18,7 @@ class PostgresDumper implements Dumper
     public function dump(string $connection, array $config, string $path): void
     {
         $binary = (string) config('db-backup.binaries.pg_dump', 'pg_dump');
+        $passwordFile = $this->writePostgresPasswordFile((string) ($config['password'] ?? ''));
 
         $command = [
             $binary,
@@ -26,12 +28,21 @@ class PostgresDumper implements Dumper
             ...$this->postgresArguments($config),
         ];
 
-        $result = Process::timeout((int) config('db-backup.timeout', 3600))
-            ->env($this->postgresEnvironment($config))
-            ->run($command);
+        try {
+            // pg_dump writes into the file as it is, so create it private first.
+            TemporaryDirectory::createPrivateFile($path);
 
-        if ($result->failed()) {
-            throw DumpFailed::fromProcess($binary, $result);
+            $result = Process::timeout((int) config('db-backup.timeout', 3600))
+                ->env($this->postgresEnvironment($config, $passwordFile))
+                ->run($command);
+
+            if ($result->failed()) {
+                throw DumpFailed::fromProcess($binary, $result);
+            }
+        } finally {
+            if ($passwordFile !== null) {
+                @unlink($passwordFile);
+            }
         }
     }
 

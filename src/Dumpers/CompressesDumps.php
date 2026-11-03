@@ -3,11 +3,13 @@
 namespace Abduns\DbBackup\Dumpers;
 
 use Abduns\DbBackup\Exceptions\DumpFailed;
+use Abduns\DbBackup\Support\TemporaryDirectory;
 
 trait CompressesDumps
 {
     /**
-     * Gzip $source into $destination in chunks, so large dumps never sit in memory.
+     * Gzip $source into $destination in chunks, so large dumps never sit in
+     * memory. The result is readable by this user only.
      *
      * @throws DumpFailed
      */
@@ -19,6 +21,8 @@ trait CompressesDumps
         if ($input === false || $output === false) {
             throw new DumpFailed(sprintf('Could not compress the dump into %s.', $destination));
         }
+
+        TemporaryDirectory::restrict($destination);
 
         try {
             while (! feof($input)) {

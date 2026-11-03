@@ -8,11 +8,11 @@ use Abduns\DbBackup\Exceptions\DumpFailed;
 use Abduns\DbBackup\Exceptions\RestoreFailed;
 use Abduns\DbBackup\Models\DatabaseBackup;
 use Abduns\DbBackup\Restorers\Restorer;
+use Abduns\DbBackup\Support\TemporaryDirectory;
 use Illuminate\Contracts\Container\Container;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -58,13 +58,19 @@ class BackupRestorer
     }
 
     /**
-     * Find a backup by file name, or by its path on the disk.
+     * Find a backup by file name, or by its path on the disk. Only files in
+     * the configured backup folder are restorable: a path anywhere else on
+     * the disk, or one that climbs out of the folder, is not found.
      */
     public function find(string $fileNameOrPath): ?RestorableBackup
     {
         $path = str_contains($fileNameOrPath, '/')
-            ? $fileNameOrPath
+            ? ltrim($fileNameOrPath, '/')
             : ltrim($this->directory().'/'.$fileNameOrPath, '/');
+
+        if (dirname($path) !== ($this->directory() === '' ? '.' : $this->directory())) {
+            return null;
+        }
 
         $backup = RestorableBackup::fromPath($path);
 
@@ -74,9 +80,12 @@ class BackupRestorer
     /**
      * Replace everything in the connection's database with the backup.
      *
-     * When the database has tables, a safety backup is taken first and the
-     * restore stops if it fails, so nothing is lost by restoring the wrong
-     * file. Returns that safety backup, or null when none was taken.
+     * The file is downloaded and checked against the checksum recorded when
+     * it was taken, when the history still has it: a restore loads whatever
+     * the file says into the database, so a file changed on the disk is
+     * refused. When the database has tables, a safety backup is taken next
+     * and the restore stops if it fails, so nothing is lost by restoring the
+     * wrong file. Returns that safety backup, or null when none was taken.
      *
      * @throws RestoreFailed
      */
@@ -89,34 +98,39 @@ class BackupRestorer
 
         $this->ensureFormatMatches($backup, $connection, $driver);
 
-        $safetyBackup = null;
-
-        if ($takeSafetyBackup && $this->hasTables($connection)) {
-            $safetyBackup = $this->backups->run($connection, label: 'pre-restore');
-
-            if (! $safetyBackup->isSucceeded()) {
-                throw new RestoreFailed('The safety backup failed, so nothing was restored: '.$safetyBackup->error);
-            }
-        }
-
         $localPath = $this->download($backup);
 
         try {
-            if ($restorer->needsEmptyDatabase()) {
-                $this->emptyDatabase($connection, $driver);
+            $checksum = $this->verifiedChecksum($backup, $localPath);
+
+            $safetyBackup = null;
+
+            if ($takeSafetyBackup && $this->hasTables($connection)) {
+                $safetyBackup = $this->backups->run($connection, label: 'pre-restore');
+
+                if (! $safetyBackup->isSucceeded()) {
+                    throw new RestoreFailed('The safety backup failed, so nothing was restored: '.$safetyBackup->error);
+                }
             }
 
-            $restorer->restore($connection, $config, $localPath);
-        } catch (RestoreFailed $exception) {
-            throw $exception;
-        } catch (Throwable $exception) {
-            throw new RestoreFailed($exception->getMessage(), previous: $exception);
+            try {
+                if ($restorer->needsEmptyDatabase()) {
+                    $this->emptyDatabase($connection, $driver);
+                }
+
+                $restorer->restore($connection, $config, $localPath);
+            } catch (RestoreFailed $exception) {
+                throw $exception;
+            } catch (Throwable $exception) {
+                throw new RestoreFailed($exception->getMessage(), previous: $exception);
+            } finally {
+                DB::purge($connection);
+            }
         } finally {
             @unlink($localPath);
-            DB::purge($connection);
         }
 
-        $this->repairHistory($backup, $safetyBackup);
+        $this->repairHistory($backup, $safetyBackup, $checksum);
 
         event(new BackupRestored($backup, $connection, $safetyBackup));
 
@@ -173,9 +187,8 @@ class BackupRestorer
 
     private function download(RestorableBackup $backup): string
     {
-        $directory = (string) config('db-backup.temporary_directory');
-        File::ensureDirectoryExists($directory);
-        $localPath = $directory.'/restore-'.Str::random(12).'-'.$backup->fileName;
+        $localPath = TemporaryDirectory::prepare().'/restore-'.Str::random(12).'-'.$backup->fileName;
+        TemporaryDirectory::createPrivateFile($localPath);
 
         $input = Storage::disk($this->disk())->readStream($backup->path);
         $output = @fopen($localPath, 'wb');
@@ -194,6 +207,52 @@ class BackupRestorer
         }
 
         return $localPath;
+    }
+
+    /**
+     * The SHA-256 of the downloaded file, after checking it against the one
+     * recorded when the backup was taken. Nothing is checked when the history
+     * does not know the file, as on a new server with an empty database.
+     *
+     * @throws RestoreFailed
+     */
+    private function verifiedChecksum(RestorableBackup $backup, string $localPath): ?string
+    {
+        $checksum = hash_file('sha256', $localPath) ?: null;
+        $recorded = $this->recordedChecksum($backup);
+
+        if ($recorded !== null && ! hash_equals($recorded, (string) $checksum)) {
+            throw new RestoreFailed(sprintf(
+                '%s does not match the checksum recorded when it was taken, so it was not restored. The file was changed on the "%s" disk.',
+                $backup->fileName,
+                $this->disk(),
+            ));
+        }
+
+        return $checksum;
+    }
+
+    private function recordedChecksum(RestorableBackup $backup): ?string
+    {
+        if (! $this->hasHistoryTable()) {
+            return null;
+        }
+
+        $checksum = DatabaseBackup::query()
+            ->succeeded()
+            ->where('disk', $this->disk())
+            ->where('path', $backup->path)
+            ->whereNotNull('checksum')
+            ->value('checksum');
+
+        return is_string($checksum) && $checksum !== '' ? $checksum : null;
+    }
+
+    private function hasHistoryTable(): bool
+    {
+        $model = new DatabaseBackup;
+
+        return Schema::connection($model->getConnectionName())->hasTable($model->getTable());
     }
 
     /**
@@ -216,11 +275,9 @@ class BackupRestorer
      * the safety backup's row was wiped by the restore. Put both right so the
      * history matches the files on the disk and retention can prune them.
      */
-    private function repairHistory(RestorableBackup $backup, ?DatabaseBackup $safetyBackup): void
+    private function repairHistory(RestorableBackup $backup, ?DatabaseBackup $safetyBackup, ?string $checksum): void
     {
-        $model = new DatabaseBackup;
-
-        if (! Schema::connection($model->getConnectionName())->hasTable($model->getTable())) {
+        if (! $this->hasHistoryTable()) {
             return;
         }
 
@@ -235,6 +292,7 @@ class BackupRestorer
             'path' => $backup->path,
             'file_name' => $backup->fileName,
             'size' => Storage::disk($this->disk())->size($backup->path),
+            'checksum' => $checksum,
             'finished_at' => $restoredRow->started_at,
         ])->save();
 

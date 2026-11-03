@@ -3,6 +3,7 @@
 namespace Abduns\DbBackup\Dumpers;
 
 use Abduns\DbBackup\Exceptions\DumpFailed;
+use Abduns\DbBackup\Support\TemporaryDirectory;
 use Illuminate\Support\Facades\DB;
 use Throwable;
 
@@ -21,6 +22,7 @@ class SqliteDumper implements Dumper
 
         try {
             DB::connection($connection)->statement('VACUUM INTO ?', [$copyPath]);
+            TemporaryDirectory::restrict($copyPath);
 
             $this->gzip($copyPath, $path);
         } catch (DumpFailed $exception) {

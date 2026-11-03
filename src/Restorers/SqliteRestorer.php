@@ -27,6 +27,12 @@ class SqliteRestorer implements Restorer
             throw new RestoreFailed(sprintf('Could not unpack the dump next to %s.', $database));
         }
 
+        // The copy takes over the permissions of the database it replaces, so a
+        // restore never leaves the database more readable than it was.
+        if (is_file($database)) {
+            @chmod($unpacked, fileperms($database) & 0777);
+        }
+
         try {
             if (stream_copy_to_stream($input, $output) === false) {
                 throw new RestoreFailed(sprintf('Could not unpack the dump next to %s.', $database));

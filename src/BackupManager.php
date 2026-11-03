@@ -10,15 +10,17 @@ use Abduns\DbBackup\Events\BackupSucceeded;
 use Abduns\DbBackup\Exceptions\DumpFailed;
 use Abduns\DbBackup\Jobs\RunDatabaseBackup;
 use Abduns\DbBackup\Models\DatabaseBackup;
+use Abduns\DbBackup\Support\TemporaryDirectory;
 use Illuminate\Contracts\Bus\Dispatcher;
 use Illuminate\Contracts\Container\Container;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Filesystem\FilesystemAdapter;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
+use League\Flysystem\Local\LocalFilesystemAdapter;
 use RuntimeException;
 use Throwable;
 
@@ -80,6 +82,8 @@ class BackupManager
         $localPath = null;
 
         try {
+            $this->ensureDiskIsPrivate($backup->disk);
+
             $config = DB::connection($backup->connection)->getConfig();
             $driver = (string) ($config['driver'] ?? '');
 
@@ -90,11 +94,10 @@ class BackupManager
             ])->save();
 
             $dumper = $this->dumperFor($backup->connection, $driver);
-            $directory = (string) config('db-backup.temporary_directory');
-            File::ensureDirectoryExists($directory);
-            $localPath = $directory.'/'.$backup->uuid.'.'.$dumper->extension();
+            $localPath = TemporaryDirectory::prepare().'/'.$backup->uuid.'.'.$dumper->extension();
 
             $dumper->dump($backup->connection, $config, $localPath);
+            TemporaryDirectory::restrict($localPath);
 
             $fileName = sprintf(
                 '%s-%s%s.%s',
@@ -112,6 +115,7 @@ class BackupManager
                 'path' => $path,
                 'file_name' => $fileName,
                 'size' => filesize($localPath) ?: 0,
+                'checksum' => hash_file('sha256', $localPath) ?: null,
                 'finished_at' => now(),
             ])->save();
 
@@ -290,6 +294,20 @@ class BackupManager
         return $this->container->make($class);
     }
 
+    /**
+     * A backup is the whole database, so it never goes to a disk that serves
+     * its files publicly.
+     */
+    private function ensureDiskIsPrivate(string $disk): void
+    {
+        if (config('filesystems.disks.'.$disk.'.visibility') === 'public') {
+            throw new RuntimeException(sprintf(
+                'The "%s" disk is public. Backups hold the whole database and must go to a private disk.',
+                $disk,
+            ));
+        }
+    }
+
     private function upload(string $disk, string $path, string $localPath): void
     {
         $stream = fopen($localPath, 'rb');
@@ -298,8 +316,16 @@ class BackupManager
             throw new RuntimeException('Could not read the dump file.');
         }
 
+        $filesystem = Storage::disk($disk);
+
+        // On a local disk, make the file readable by this user only. Other
+        // drivers keep the bucket's own policy: an ACL could be refused there.
+        $options = $filesystem instanceof FilesystemAdapter && $filesystem->getAdapter() instanceof LocalFilesystemAdapter
+            ? ['visibility' => 'private']
+            : [];
+
         try {
-            $written = Storage::disk($disk)->writeStream($path, $stream);
+            $written = $filesystem->writeStream($path, $stream, $options);
         } finally {
             if (is_resource($stream)) {
                 fclose($stream);

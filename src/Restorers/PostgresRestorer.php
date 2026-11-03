@@ -17,6 +17,7 @@ class PostgresRestorer implements Restorer
     public function restore(string $connection, array $config, string $path): void
     {
         $binary = (string) config('db-backup.binaries.pg_restore', 'pg_restore');
+        $passwordFile = $this->writePostgresPasswordFile((string) ($config['password'] ?? ''));
 
         $command = [
             $binary,
@@ -27,12 +28,18 @@ class PostgresRestorer implements Restorer
             $path,
         ];
 
-        $result = Process::timeout((int) config('db-backup.timeout', 3600))
-            ->env($this->postgresEnvironment($config))
-            ->run($command);
+        try {
+            $result = Process::timeout((int) config('db-backup.timeout', 3600))
+                ->env($this->postgresEnvironment($config, $passwordFile))
+                ->run($command);
 
-        if ($result->failed()) {
-            throw RestoreFailed::fromProcess($binary, $result);
+            if ($result->failed()) {
+                throw RestoreFailed::fromProcess($binary, $result);
+            }
+        } finally {
+            if ($passwordFile !== null) {
+                @unlink($passwordFile);
+            }
         }
     }
 

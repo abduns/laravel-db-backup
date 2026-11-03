@@ -4,6 +4,7 @@ namespace Abduns\DbBackup\Dumpers;
 
 use Abduns\DbBackup\Exceptions\DumpFailed;
 use Abduns\DbBackup\Support\ConnectsToMySql;
+use Abduns\DbBackup\Support\TemporaryDirectory;
 use Illuminate\Support\Facades\Process;
 
 /**
@@ -29,6 +30,9 @@ class MySqlDumper implements Dumper
         ];
 
         try {
+            // The plain SQL is the whole database in the clear: keep it private.
+            TemporaryDirectory::createPrivateFile($sqlPath);
+
             $result = Process::timeout((int) config('db-backup.timeout', 3600))->run($command);
 
             if ($result->failed()) {

@@ -135,8 +135,16 @@ test('the restore stops when the safety backup fails', function () {
     expect(DB::connection('app')->table('notes')->count())->toBe(2);
 });
 
-test('pg_restore loads the dump in one transaction with the password only in the environment', function () {
-    Process::fake();
+test('pg_restore loads the dump in one transaction with the password only in a private password file', function () {
+    $passwordFile = null;
+    $passwordFileContents = null;
+
+    Process::fake(function ($process) use (&$passwordFile, &$passwordFileContents) {
+        $passwordFile = $process->environment['PGPASSFILE'];
+        $passwordFileContents = file_get_contents($passwordFile);
+
+        return Process::result();
+    });
 
     (new PostgresRestorer)->restore('pgsql', [
         'host' => 'db.internal',
@@ -157,7 +165,41 @@ test('pg_restore loads the dump in one transaction with the password only in the
         '--username=app',
         '--dbname=production',
         '/tmp/in.dump',
-    ] && $process->environment === ['PGPASSWORD' => 'secret']);
+    ] && array_keys($process->environment) === ['PGPASSFILE']);
+
+    expect($passwordFileContents)->toBe("*:*:*:*:secret\n")
+        ->and(file_exists($passwordFile))->toBeFalse();
+});
+
+test('a backup that was changed on the disk since it was taken is refused', function () {
+    config(['database.default' => 'app']);
+    $this->artisan('migrate', ['--database' => 'app', '--path' => realpath(__DIR__.'/../database/migrations'), '--realpath' => true]);
+
+    $backup = app(BackupManager::class)->run();
+    Storage::disk('backups')->put($backup->path, gzencode('not the database'));
+
+    $this->artisan('db-backup:restore', ['backup' => $backup->file_name, '--force' => true])
+        ->expectsOutputToContain($backup->file_name.' does not match the checksum recorded when it was taken, so it was not restored.')
+        ->assertFailed();
+
+    expect(DB::connection('app')->table('notes')->pluck('body')->all())->toBe(['original'])
+        ->and(DatabaseBackup::query()->where('label', 'pre-restore')->exists())->toBeFalse()
+        ->and(glob(config('db-backup.temporary_directory').'/*'))->toBe([]);
+});
+
+test('only files in the backup folder can be restored', function () {
+    $backup = app(BackupManager::class)->run('app');
+    Storage::disk('backups')->put('elsewhere/'.$backup->file_name, Storage::disk('backups')->get($backup->path));
+    Storage::disk('backups')->put($backup->file_name, Storage::disk('backups')->get($backup->path));
+    $restorer = app(BackupRestorer::class);
+
+    expect($restorer->find($backup->file_name)?->path)->toBe($backup->path)
+        ->and($restorer->find($backup->path)?->path)->toBe($backup->path)
+        ->and($restorer->find('/'.$backup->path)?->path)->toBe($backup->path)
+        ->and($restorer->find('elsewhere/'.$backup->file_name))->toBeNull()
+        ->and($restorer->find('/'.$backup->file_name))->toBeNull()
+        ->and($restorer->find('db-backups/../'.$backup->file_name))->toBeNull()
+        ->and($restorer->find('../db-backups/'.$backup->file_name))->toBeNull();
 });
 
 test('the mysql client receives the unpacked dump on stdin and the password from an option file', function () {

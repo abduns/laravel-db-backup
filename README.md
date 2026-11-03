@@ -107,6 +107,7 @@ $backup = app(BackupManager::class)->queue(triggeredBy: $request->user()); // ru
 
 $backup->status;      // BackupStatus::Pending|Running|Succeeded|Failed
 $backup->path;        // path on $backup->disk
+$backup->checksum;    // SHA-256 of the file, checked again before a restore
 $backup->error;       // why it failed
 $backup->triggeredBy; // the model that asked for it, null for scheduled runs
 ```
@@ -145,12 +146,13 @@ php artisan db-backup:restore --latest --force --migrate   # unattended, then mi
 
 How it works:
 
-1. Backups are found by **listing the disk**, not the `database_backups` table, so a new server with an empty database can restore.
+1. Backups are found by **listing the backup folder on the disk**, not the `database_backups` table, so a new server with an empty database can restore. Files outside that folder are never restored.
 2. The file must match the connection's driver; a `.dump` is never loaded into MySQL.
-3. If the database has tables, a **safety backup** is taken first, named `…-pre-restore.<ext>`. If it fails, nothing is restored.
-4. PostgreSQL and MySQL: every table, view and (PostgreSQL) type is dropped, then the dump is loaded. `pg_restore` runs with `--single-transaction --exit-on-error`. SQLite: the database file is swapped for the restored copy.
-5. The history table is repaired: the restored backup's own row, which still said "running" when it was dumped, is marked succeeded, and the safety backup's row is added back.
-6. `Abduns\DbBackup\Events\BackupRestored` is fired.
+3. The file is downloaded and its SHA-256 is compared with the one recorded when the backup was taken. A file that was changed on the disk is refused. On a server whose history does not know the file (a new server), there is nothing to compare with and the check is skipped.
+4. If the database has tables, a **safety backup** is taken first, named `…-pre-restore.<ext>`. If it fails, nothing is restored.
+5. PostgreSQL and MySQL: every table, view and (PostgreSQL) type is dropped, then the dump is loaded. `pg_restore` runs with `--single-transaction --exit-on-error`. SQLite: the database file is swapped for the restored copy.
+6. The history table is repaired: the restored backup's own row, which still said "running" when it was dumped, is marked succeeded, and the safety backup's row is added back.
+7. `Abduns\DbBackup\Events\BackupRestored` is fired.
 
 From code:
 
@@ -171,6 +173,25 @@ Restoring needs `pg_restore` (PostgreSQL) or the `mysql` client (MySQL, MariaDB)
 4. Point DNS at the new server and stop the old scheduler.
 
 Files outside the database (uploads on a local disk, keys in `storage/`) are not part of a backup; copy them separately.
+
+## Security
+
+A backup is a complete copy of the database, and a restore loads whatever the file says. Treat the disk accordingly.
+
+**The disk is a trust boundary.** Anyone who can write to the backup folder can change what the next restore loads. A changed `mysqldump` file is executed by the `mysql` client as-is, including client commands such as `\!` that run shell commands on the restoring server, and a changed `pg_dump` or SQLite file replaces every table. So:
+
+- Use a dedicated bucket with credentials that nothing else holds. The package refuses a disk whose `visibility` is `public`.
+- Turn on versioning or object lock and encryption at rest (SSE) on the bucket. The package does not encrypt dumps itself.
+- Before restoring, the file is compared with the SHA-256 recorded in `database_backups` when it was taken, and refused when they differ. The check cannot run when the history is empty (a brand-new server), so on a new server also confirm the file's checksum by hand, with the `checksum` column of the old server or the `BackupSucceeded` event.
+- `db-backup:restore` only loads files from the configured backup folder, never from elsewhere on the disk.
+
+**Credentials** never appear on the command line or in the process list. `pg_dump` and `pg_restore` read the password from a password file (`PGPASSFILE`) only your user can read, and `mysqldump` and `mysql` from a `--defaults-extra-file` option file; both are deleted when the tool exits. The PostgreSQL connection's `sslmode`, `sslcert`, `sslkey` and `sslrootcert` settings are passed on, so the dump is made over the same kind of connection the application uses.
+
+**Temporary files** are written to `db-backup.temporary_directory` (`storage/app/db-backup-temp` by default). The package creates that folder for your user only and every dump and download in it is readable by your user only, then deleted. Keep it on a disk with enough room for one uncompressed dump, and do not point it at a shared folder such as `/tmp`.
+
+**Who may restore** is up to you. The commands run with the application's own database credentials, so anyone who can run `artisan` can replace the database. `BackupRestorer::restore()` and `BackupManager::run()` do no authorization of their own; guard the screens or endpoints you build on them, and prefer `db-backup:restore` with `--force` only in deployment scripts.
+
+Report a vulnerability privately to the maintainer rather than in a public issue.
 
 ## Testing
 

@@ -32,6 +32,11 @@ trait ConnectsToMySql
         ];
     }
 
+    /**
+     * Write the password to an option file only this user can read and return
+     * its path. Quotes, backslashes and line breaks are escaped the way the
+     * MySQL option file parser expects, so the password cannot add options.
+     */
     protected function writeMySqlOptionFile(string $password): string
     {
         $file = tempnam(sys_get_temp_dir(), 'db-backup-');
@@ -41,7 +46,7 @@ trait ConnectsToMySql
         }
 
         chmod($file, 0600);
-        file_put_contents($file, "[client]\npassword=\"".addcslashes($password, '\\"')."\"\n");
+        file_put_contents($file, "[client]\npassword=\"".addcslashes($password, "\\\"\n\r")."\"\n");
 
         return $file;
     }

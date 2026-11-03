@@ -22,6 +22,7 @@ use Illuminate\Support\Carbon;
  * @property string|null $path
  * @property string|null $file_name
  * @property int|null $size
+ * @property string|null $checksum SHA-256 of the file, hex encoded
  * @property string|null $error
  * @property Carbon|null $started_at
  * @property Carbon|null $finished_at
